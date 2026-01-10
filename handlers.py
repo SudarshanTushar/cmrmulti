@@ -9,11 +9,11 @@ from pydub import AudioSegment
 from openai import AsyncOpenAI
 from gtts import gTTS
 from pyrogram import Client, filters, enums
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, InputMediaPhoto
-from pyrogram.handlers import MessageHandler, CallbackQueryHandler
+from pyrogram.types import Message, InputMediaPhoto
+from pyrogram.handlers import MessageHandler
 from duckduckgo_search import DDGS
 from config import SAMBANOVA_API_KEY, SAMBANOVA_BASE_URL
-from db import get_history, add_history, clear_history, set_user_mode, get_user_mode
+from db import get_history, add_history, clear_history
 
 # --- AI CONFIGURATION ---
 aclient = AsyncOpenAI(
@@ -28,70 +28,22 @@ MODEL_LIST = [
     "Meta-Llama-3.1-8B-Instruct",
 ]
 
-# --- 🎭 PERSONA PROMPTS ---
-BASE_INSTRUCTIONS = """
-CORE DIRECTIVES:
-1. **LANGUAGE:** ALWAYS reply in the SAME language the user speaks.
-2. **GRAPHICS:** If asked for a Roadmap, generate a `mermaid` code block (graph TD).
-3. **REAL-TIME:** Use [WEB_SEARCH_RESULTS] if provided.
+# --- 🧠 UNIFIED SYSTEM INTELLIGENCE ---
+SYSTEM_PROMPT = """
+You are a High-Performance Career Guidance AI.
+Your sole purpose is to provide clear, actionable, and strategic career advice.
+
+OPERATIONAL PROTOCOLS:
+1. **SIMPLE LANGUAGE:** Explain complex concepts in plain, direct English. No academic jargon. No fluff.
+2. **VISUAL STRATEGY:** If the user asks for a "roadmap", "path", "guide", or "steps", you MUST generate a `mermaid` code block (graph TD).
+3. **REAL-TIME INTEL:** Use [WEB_SEARCH_RESULTS] if provided to give current market data.
+4. **VOICE OPTIMIZED:** Keep responses structured and concise so they are easy to listen to via voice output.
+
+FORMATTING RULES:
+- Use bolding for key terms.
+- Use bullet points for steps.
+- Mermaid graphs must use `graph TD`.
 """
-
-PERSONAS = {
-    "father": """
-You are the user's CAREER–STABILITY ADVISOR.
-Tone: Strict, ROI-driven, risk-averse, long-term thinker.
-Focus: Income predictability, employability, credential value, career durability.
-Style: Direct, disciplined, no emotional language.
-Role:
-- Evaluate every career choice by salary floor, growth ceiling, and failure risk.
-- Warn against unstable paths unless upside clearly outweighs risk.
-- Prefer engineering, government roles, corporate ladders, regulated professions.
-""",
-
-"mother": """
-You are the user's WELL-BEING & LIFE BALANCE ADVISOR.
-Tone: Calm, protective, practical.
-Focus: Mental health, burnout risk, work-life balance, sustainability.
-Style: Warm but grounded.
-Role:
-- Flag career paths that cause extreme stress, instability, or isolation.
-- Push for routines, health, and long-term livability.
-- Prevent self-destructive ambition.
-""",
-
-"brother": """
-You are the user's MARKET-REALITY & MONEY ADVISOR.
-Tone: Sharp, street-smart, brutally practical.
-Focus: What skills actually pay, what markets reward, how fast income grows.
-Style: No-nonsense, anti-BS.
-Role:
-- Identify high-leverage skills, scalable careers, and income acceleration paths.
-- Kill fantasies that don’t make money.
-- Push toward opportunities with asymmetric upside.
-""",
-
-"sister": """
-You are the user's MOTIVATION & PERSONAL FIT ADVISOR.
-Tone: Supportive, modern, emotionally intelligent.
-Focus: Interests, strengths, energy, personal satisfaction.
-Style: Friendly but realistic.
-Role:
-- Check if a path matches the user’s personality and strengths.
-- Prevent chasing a career they will quit in 2 years.
-- Balance ambition with enjoyment.
-""",
-
-"teacher": """
-You are the user's STRATEGIC CAREER ARCHITECT (Guru).
-Tone: Formal, analytical, precise.
-Focus: Skill stacks, timelines, exams, certifications, learning roadmaps.
-Style: Structured and professional.
-Role:
-- Convert career goals into step-by-step execution plans.
-- Map degrees, competitive exams, projects, and milestones.
-- Optimize the path for maximum long-term power.
-"""
-}
 
 # --- SEARCH ENGINE ---
 def search_sync(query):
@@ -145,9 +97,14 @@ async def get_mermaid_image(mermaid_code):
 
 def text_to_audio(text):
     try:
+        # Remove mermaid code blocks from audio to avoid reading code aloud
+        clean_text = re.sub(r"```mermaid.*?```", "I have generated a visual roadmap for you.", text, flags=re.DOTALL)
+        clean_text = clean_text.replace("*", "") # Remove markdown formatting for smoother speech
+        
         lang_code = 'en'
         if any('\u0900' <= char <= '\u097f' for char in text): lang_code = 'hi'
-        tts = gTTS(text=text, lang=lang_code, slow=False)
+        
+        tts = gTTS(text=clean_text, lang=lang_code, slow=False)
         audio_io = io.BytesIO()
         tts.write_to_fp(audio_io)
         audio_io.seek(0)
@@ -157,12 +114,8 @@ def text_to_audio(text):
         return None
 
 # --- GENERATION LOGIC ---
-async def generate_with_fallback(history, user_prompt, user_mode="teacher", search_context=""):
-    # 1. Select the correct System Prompt based on Mode
-    persona_prompt = PERSONAS.get(user_mode, PERSONAS["teacher"])
-    full_system_prompt = f"{persona_prompt}\n{BASE_INSTRUCTIONS}"
-    
-    messages = [{"role": "system", "content": full_system_prompt}]
+async def generate_response(history, user_prompt, search_context=""):
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     
     if history:
         for entry in history:
@@ -179,48 +132,34 @@ async def generate_with_fallback(history, user_prompt, user_mode="teacher", sear
     for model in MODEL_LIST:
         try:
             resp = await aclient.chat.completions.create(
-                model=model, messages=messages, temperature=0.7, max_tokens=1000
+                model=model, messages=messages, temperature=0.6, max_tokens=1500
             )
             return resp.choices[0].message.content
         except:
             continue
-    return "⚠️ I am having trouble thinking right now."
+    return "⚠️ System Overload. Retry."
 
 # --- HANDLERS ---
 async def start_handler(client: Client, message: Message):
     await clear_history(message.chat.id)
     await message.reply(
-        "**Namaste! 🙏**\n\nI can talk to you in 5 different modes:\n"
-        "👨‍👧 **Father** (Strict & Protective)\n"
-        "🤱 **Mother** (Caring & Emotional)\n"
-        "🤛 **Brother** (Tough Love)\n"
-        "💁‍♀️ **Sister** (Friendly & Fun)\n"
-        "👨‍🏫 **Teacher** (Formal & Wise)\n\n"
-        "Type **/mode** to switch personas!"
+        "**🚀 Career Guidance System Online.**\n\n"
+        "I provide direct career strategy, visual roadmaps, and market reality.\n"
+        "You can send text or voice notes.\n\n"
+        "**Commands:**\n"
+        "/start - Reset Context"
     )
-
-async def mode_command_handler(client: Client, message: Message):
-    """Shows buttons to switch modes"""
-    buttons = InlineKeyboardMarkup([
-        [InlineKeyboardButton("👨‍👧 Father", callback_data="mode_father"), InlineKeyboardButton("🤱 Mother", callback_data="mode_mother")],
-        [InlineKeyboardButton("🤛 Brother", callback_data="mode_brother"), InlineKeyboardButton("💁‍♀️ Sister", callback_data="mode_sister")],
-        [InlineKeyboardButton("👨‍🏫 Teacher", callback_data="mode_teacher")]
-    ])
-    await message.reply("🎭 **Choose my personality:**", reply_markup=buttons)
 
 async def chat_handler(client: Client, message: Message):
     chat_id = message.chat.id
     
     try:
-        # Get User Mode
-        user_mode = await get_user_mode(chat_id)
-        
         if message.voice:
             await client.send_chat_action(chat_id, enums.ChatAction.RECORD_AUDIO)
             voice_bytes = bytes((await message.download(in_memory=True)).getbuffer())
             user_prompt = await transcribe_audio(voice_bytes)
             if not user_prompt:
-                await message.reply("⚠️ Couldn't hear you.")
+                await message.reply("⚠️ Audio Unintelligible.")
                 return
             display_text = f"🎤 {user_prompt}"
         else:
@@ -228,49 +167,41 @@ async def chat_handler(client: Client, message: Message):
             user_prompt = message.text
             display_text = message.text
 
-        # Search
+        # Search Trigger
         search_context = ""
-        if any(x in user_prompt.lower() for x in ["news", "price", "weather", "latest"]):
+        if any(x in user_prompt.lower() for x in ["news", "salary", "job market", "trends", "latest"]):
             await client.send_chat_action(chat_id, enums.ChatAction.FIND_LOCATION)
             search_context = await perform_web_search(user_prompt)
 
-        # Generate (Passing the User Mode)
+        # Generate Response
         past_history = await get_history(chat_id)
-        ai_text = await generate_with_fallback(past_history, user_prompt, user_mode, search_context)
+        ai_text = await generate_response(past_history, user_prompt, search_context)
         
         await add_history(chat_id, display_text, ai_text)
 
-        # Graphics
+        # Graphics Processing
         if "```mermaid" in ai_text:
             try:
                 matches = re.findall(r"```mermaid(.*?)```", ai_text, re.DOTALL)
                 if matches:
                     image_file, _ = await get_mermaid_image(matches[0].strip())
+                    # Clean the code block from the text response for better readability
                     ai_text = re.sub(r"```mermaid(.*?)```", "", ai_text, flags=re.DOTALL).strip()
                     if image_file:
-                        await client.send_photo(chat_id, photo=image_file, caption="**📍 Roadmap**")
+                        await client.send_photo(chat_id, photo=image_file, caption="**📍 Strategic Roadmap**")
             except: pass
 
-        # Reply
+        # Reply Logic
         if message.voice:
             audio = text_to_audio(ai_text)
             if audio: await message.reply_voice(audio, caption=ai_text[:200])
-            else: await message.reply(ai_text)
+            else: await message.reply(ai_text, parse_mode=enums.ParseMode.MARKDOWN)
         else:
             await message.reply(ai_text, parse_mode=enums.ParseMode.MARKDOWN)
 
     except Exception as e:
-        await message.reply(f"⚠️ Error: {e}")
-
-async def button_handler(client: Client, cb: CallbackQuery):
-    if cb.data.startswith("mode_"):
-        new_mode = cb.data.split("_")[1]
-        await set_user_mode(cb.message.chat.id, new_mode)
-        await clear_history(cb.message.chat.id)
-        await cb.message.edit_text(f"✅ **Mode Switched to: {new_mode.capitalize()}!**\n\nI will now talk like your {new_mode}.")
+        await message.reply(f"⚠️ System Error: {e}")
 
 def register_handlers(app: Client):
     app.add_handler(MessageHandler(start_handler, filters.command("start")))
-    app.add_handler(MessageHandler(mode_command_handler, filters.command("mode")))
-    app.add_handler(MessageHandler(chat_handler, (filters.text | filters.voice) & ~filters.command(["start", "mode"])))
-    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(chat_handler, (filters.text | filters.voice) & ~filters.command("start")))
