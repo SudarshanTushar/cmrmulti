@@ -1,0 +1,16 @@
+# Heroku Deployment Files
+*.session
+*.session-journal
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv/
+venv/
+ENV/
+env/
+.DS_Store
+Thumbs.db
+add_test_questions.py
+create_test_set.py
