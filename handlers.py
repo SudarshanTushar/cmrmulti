@@ -23,7 +23,9 @@ aclient = AsyncOpenAI(
 
 # --- MODEL LIST ---
 MODEL_LIST = [
-    "Meta-Llama-3.1-70B-Instruct",
+    "Meta-Llama-3.3-70B-Instruct",
+    "Meta-Llama-3.1-70B-Instruct", 
+    "Meta-Llama-3.1-8B-Instruct",
 ]
 
 # --- 🧠 UNIFIED SYSTEM INTELLIGENCE ---
