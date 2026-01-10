@@ -8,7 +8,7 @@ MONGO_URI = "mongodb+srv://omkarwaghmare584:7XMZR6TqVjjlE3jL@cluster0.ucjntlp.mo
 # "mongodb+srv://omkarwaghmare584:7XMZR6TqVjjlE3jL@cluster0.ucjntlp.mongodb.net/?retryWrites=true&w=tushar"  # Replace with your MongoDB URI (e.g., MongoDB Atlas URI)
 
 # Gemini AI Configuration
-SAMBANOVA_API_KEY = "40be9a7d-4664-45ce-8189-265b93c6f39d" 
+SAMBANOVA_API_KEY = "1072979d-cefb-4994-a054-f1e0272be970" 
 SAMBANOVA_BASE_URL = "https://api.sambanova.ai/v1"
 
 # GEMINI_API_KEY = "AIzaSyAw2gVkup6ybzLY_xnV9-4W-MxarG6F4ec"
