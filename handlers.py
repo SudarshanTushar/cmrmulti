@@ -18,7 +18,7 @@ from pypdf import PdfReader
 from config import SAMBANOVA_API_KEY, SAMBANOVA_BASE_URL
 from db import get_history, add_history, clear_history
 
-# --- AI CLIENT ---
+# --- AI CONFIGURATION ---
 aclient = AsyncOpenAI(
     api_key=SAMBANOVA_API_KEY,
     base_url=SAMBANOVA_BASE_URL
@@ -37,7 +37,7 @@ You are 'Pathsetu', an Elite AI Assistant.
    - Treat the text provided in `[FILE_CONTENT]` as if you read the file yourself.
 
 2. **VISUALS & GRAPHS:** - When explaining processes, roadmaps, or flows, YOU MUST use a `mermaid` graph.
-   - Use `graph TD` (Top-Down) layout.
+   - **Syntax Rule:** Use standard `graph TD`. Keep node labels simple. Avoid special characters like "()" inside labels unless quoted.
    - Example:
      ```mermaid
      graph TD
@@ -48,7 +48,7 @@ You are 'Pathsetu', an Elite AI Assistant.
 3. **LANGUAGE:** Reply in the EXACT language of the user.
 """
 
-# --- HELPERS ---
+# --- HELPER FUNCTIONS ---
 
 async def perform_web_search(query):
     try:
@@ -112,7 +112,7 @@ async def transcribe_audio(file_bytes):
 
 def text_to_audio(text):
     try:
-        # Clean text removing code/mermaid for speech
+        # Hide code blocks from speech
         clean_text = re.sub(r"```.*?```", " Visual diagram provided below. ", text, flags=re.DOTALL)
         clean_text = clean_text.replace("*", "").replace("#", "")
         lang_code = 'en'
@@ -128,15 +128,23 @@ def text_to_audio(text):
         return None
 
 async def get_mermaid_image(mermaid_code):
+    """
+    Converts Mermaid code to an Image using mermaid.ink API.
+    """
     try:
+        # Cleanup: Remove the backticks if present (just in case)
         graph_code = mermaid_code.replace("```mermaid", "").replace("```", "").strip()
-        # Theme injection
+        
+        # Theme: Add styling
         if "%%{init:" not in graph_code:
             graph_code = "%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#ffcc00', 'edgeLabelBackground':'#ffffff', 'tertiaryColor': '#fff'}}}%%\n" + graph_code
+        
+        # Ensure correct direction (Top-Down is best for mobile)
         graph_code = graph_code.replace("graph LR", "graph TD")
         
+        # Encode for API
         b64 = base64.urlsafe_b64encode(graph_code.encode("utf8")).decode('ascii')
-        url = f"[https://mermaid.ink/img/](https://mermaid.ink/img/){b64}?bgColor=FFFFFF"
+        url = f"https://mermaid.ink/img/{b64}?bgColor=FFFFFF"
         
         async with httpx.AsyncClient() as client:
             resp = await client.get(url, timeout=20.0)
@@ -144,9 +152,11 @@ async def get_mermaid_image(mermaid_code):
                 file_obj = io.BytesIO(resp.content)
                 file_obj.name = "roadmap.jpg"
                 return file_obj, url
-            return None, None
+            else:
+                logging.error(f"Mermaid API Error: {resp.status_code}")
+                return None, None
     except Exception as e:
-        logging.error(f"Mermaid Error: {e}")
+        logging.error(f"Mermaid Exception: {e}")
         return None, None
 
 # --- GENERATION LOGIC ---
@@ -154,12 +164,14 @@ async def get_mermaid_image(mermaid_code):
 async def generate_text_response(history, user_prompt, current_file_content=""):
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     
+    # Add History
     if history:
         for entry in history[-4:]:
             role = "assistant" if entry.get("role") == "model" else "user"
             content = entry.get("parts", [""])[0]
             messages.append({"role": role, "content": str(content)})
             
+    # Combine Context
     final_user_message = user_prompt
     if current_file_content:
         final_user_message = f"""
@@ -179,9 +191,9 @@ async def generate_text_response(history, user_prompt, current_file_content=""):
         return resp.choices[0].message.content
     except Exception as e:
         logging.error(f"Model Error: {e}")
-        return "⚠️ Server busy."
+        return "⚠️ Server busy. Please try again."
 
-# --- HANDLERS ---
+# --- MAIN HANDLERS ---
 
 async def start_handler(client: Client, message: Message):
     await clear_history(message.chat.id)
@@ -196,14 +208,14 @@ async def chat_handler(client: Client, message: Message):
     try:
         await client.send_chat_action(chat_id, enums.ChatAction.TYPING)
 
-        # 1. IMAGE (Vision)
+        # 1. IMAGE HANDLING
         if message.photo:
             ai_text = await analyze_image_samba(client, message, message.caption or "Explain image")
             await message.reply(f"**🖼️ Analysis:**\n{ai_text}", parse_mode=enums.ParseMode.MARKDOWN)
             await add_history(chat_id, f"[Image Sent]: {message.caption}", ai_text)
             return
 
-        # 2. PDF / DOCUMENT
+        # 2. PDF / DOCUMENT HANDLING
         elif message.document:
             if message.document.mime_type == "application/pdf":
                 status_msg = await message.reply("📄 Processing PDF...", quote=True)
@@ -224,7 +236,7 @@ async def chat_handler(client: Client, message: Message):
                 user_prompt = message.caption or "Analyze code."
                 display_text = f"{user_prompt}\n\n[FILE CONTENT]:\n{text_content}"
 
-        # 3. VOICE
+        # 3. VOICE HANDLING
         elif message.voice:
             voice_bytes = bytes((await message.download(in_memory=True)).getbuffer())
             user_prompt = await transcribe_audio(voice_bytes)
@@ -233,42 +245,45 @@ async def chat_handler(client: Client, message: Message):
                 return
             display_text = f"🎤 {user_prompt}"
 
-        # 4. TEXT
+        # 4. TEXT HANDLING
         elif message.text:
             user_prompt = message.text
             display_text = message.text
 
-        # 5. SEARCH
+        # 5. WEB SEARCH (If needed)
         if not current_file_content and any(x in str(user_prompt).lower() for x in ["salary", "job", "news"]):
             search_res = await perform_web_search(user_prompt + " India")
             if search_res: 
                 user_prompt += f"\n{search_res}"
                 display_text += f"\n{search_res}"
 
-        # 6. GENERATE & SAVE
+        # 6. GENERATE AI RESPONSE
         past_history = await get_history(chat_id)
         ai_text = await generate_text_response(past_history, user_prompt, current_file_content)
         await add_history(chat_id, display_text, ai_text)
 
-        # 7. GENERATE GRAPHICS (RESTORED!)
+        # 7. GENERATE GRAPHICS (FIXED LOGIC)
         if "```mermaid" in ai_text:
             try:
-                # Find the code block
+                # Use REGEX DOTALL to catch newlines inside the block
                 matches = re.findall(r"```mermaid(.*?)```", ai_text, re.DOTALL)
                 if matches:
-                    # Generate Image
-                    image_file, _ = await get_mermaid_image(matches[0].strip())
+                    mermaid_code = matches[0].strip()
+                    image_file, _ = await get_mermaid_image(mermaid_code)
                     
-                    # Remove the raw code from the text reply so it looks clean
-                    ai_text = re.sub(r"```mermaid(.*?)```", "", ai_text, flags=re.DOTALL).strip()
-                    
-                    # Send Image
                     if image_file:
+                        # SUCCESS: Send Image & Clean Text
                         await client.send_photo(chat_id, photo=image_file, caption="**📊 Visual Roadmap**")
+                        # Remove the code from text ONLY if image sent successfully
+                        ai_text = re.sub(r"```mermaid(.*?)```", "", ai_text, flags=re.DOTALL).strip()
+                    else:
+                        # FAIL: Keep the text so user sees something
+                        logging.error("Mermaid generation failed, keeping text fallback.")
+                        ai_text += "\n\n*(⚠️ Graph image could not be generated, raw code shown above)*"
             except Exception as e:
                 logging.error(f"Graph Error: {e}")
 
-        # 8. REPLY
+        # 8. SEND FINAL REPLY
         if message.voice:
             audio = text_to_audio(ai_text)
             if audio: 
