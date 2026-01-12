@@ -10,3 +10,4 @@ duckduckgo-search
 httpx
 speechrecognition
 pydub
+pypdf
