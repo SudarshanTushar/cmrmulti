@@ -27,21 +27,25 @@ aclient = AsyncOpenAI(
 TEXT_MODEL = "Meta-Llama-3.3-70B-Instruct"
 VISION_MODEL = "Llama-3.2-11B-Vision-Instruct" 
 
-# --- UPDATED SYSTEM PROMPT ---
+# --- SYSTEM PROMPT ---
 SYSTEM_PROMPT = """
 You are 'Pathsetu', an Elite AI Assistant.
 
 ### CRITICAL RULES:
 1. **CONTEXT AWARENESS:** The system has ALREADY read the file and provided the text in the message below marked as `[FILE_CONTENT_START]`. 
    - **DO NOT** say "I cannot read files". 
-   - **DO NOT** say "I am an AI model and cannot access external files".
    - Treat the text provided in `[FILE_CONTENT]` as if you read the file yourself.
 
-2. **MEMORY:** You must remember the content of the file for follow-up questions.
+2. **VISUALS & GRAPHS:** - When explaining processes, roadmaps, or flows, YOU MUST use a `mermaid` graph.
+   - Use `graph TD` (Top-Down) layout.
+   - Example:
+     ```mermaid
+     graph TD
+     A[Start] --> B[Skill 1]
+     B --> C[Job]
+     ```
 
 3. **LANGUAGE:** Reply in the EXACT language of the user.
-
-4. **FORMAT:** Use Markdown. Use `mermaid` graph TD for processes.
 """
 
 # --- HELPERS ---
@@ -61,19 +65,14 @@ async def extract_pdf_text(client, message):
         doc_path = await client.download_media(message)
         reader = PdfReader(doc_path)
         text = ""
-        # Read up to 15 pages
         for page in reader.pages[:15]: 
             extracted = page.extract_text()
             if extracted:
                 text += extracted + "\n"
-        
         os.remove(doc_path)
         
-        # Scanned PDF Check
-        if len(text.strip()) < 50:
-            return None 
-            
-        return text[:15000] # Limit to 15k chars for memory safety
+        if len(text.strip()) < 50: return None 
+        return text[:15000]
     except Exception as e:
         logging.error(f"PDF Error: {e}")
         return None
@@ -113,7 +112,8 @@ async def transcribe_audio(file_bytes):
 
 def text_to_audio(text):
     try:
-        clean_text = re.sub(r"```.*?```", "Code snippet.", text, flags=re.DOTALL)
+        # Clean text removing code/mermaid for speech
+        clean_text = re.sub(r"```.*?```", " Visual diagram provided below. ", text, flags=re.DOTALL)
         clean_text = clean_text.replace("*", "").replace("#", "")
         lang_code = 'en'
         if any('\u0900' <= char <= '\u097f' for char in text): 
@@ -127,24 +127,43 @@ def text_to_audio(text):
     except:
         return None
 
+async def get_mermaid_image(mermaid_code):
+    try:
+        graph_code = mermaid_code.replace("```mermaid", "").replace("```", "").strip()
+        # Theme injection
+        if "%%{init:" not in graph_code:
+            graph_code = "%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#ffcc00', 'edgeLabelBackground':'#ffffff', 'tertiaryColor': '#fff'}}}%%\n" + graph_code
+        graph_code = graph_code.replace("graph LR", "graph TD")
+        
+        b64 = base64.urlsafe_b64encode(graph_code.encode("utf8")).decode('ascii')
+        url = f"[https://mermaid.ink/img/](https://mermaid.ink/img/){b64}?bgColor=FFFFFF"
+        
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, timeout=20.0)
+            if resp.status_code == 200:
+                file_obj = io.BytesIO(resp.content)
+                file_obj.name = "roadmap.jpg"
+                return file_obj, url
+            return None, None
+    except Exception as e:
+        logging.error(f"Mermaid Error: {e}")
+        return None, None
+
 # --- GENERATION LOGIC ---
 
 async def generate_text_response(history, user_prompt, current_file_content=""):
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     
-    # 1. Add Chat History (This now includes previous PDF text from DB)
     if history:
-        for entry in history[-4:]: # Last 4 turns
+        for entry in history[-4:]:
             role = "assistant" if entry.get("role") == "model" else "user"
             content = entry.get("parts", [""])[0]
             messages.append({"role": role, "content": str(content)})
             
-    # 2. Add CURRENT New File Content (if any)
     final_user_message = user_prompt
     if current_file_content:
         final_user_message = f"""
         MY QUESTION: {user_prompt}
-        
         [SYSTEM: THE FILE HAS BEEN OPENED. HERE IS THE CONTENT:]
         [FILE_CONTENT_START]
         {current_file_content}
@@ -170,9 +189,9 @@ async def start_handler(client: Client, message: Message):
 
 async def chat_handler(client: Client, message: Message):
     chat_id = message.chat.id
-    current_file_content = "" # Only for THIS turn
+    current_file_content = ""
     user_prompt = ""
-    display_text = "" # What is saved to DB
+    display_text = ""
     
     try:
         await client.send_chat_action(chat_id, enums.ChatAction.TYPING)
@@ -191,18 +210,14 @@ async def chat_handler(client: Client, message: Message):
                 pdf_text = await extract_pdf_text(client, message)
                 
                 if pdf_text:
-                    # IMPORTANT: We attach text to this variable
                     current_file_content = pdf_text
                     user_prompt = message.caption or "Analyze this PDF file."
-                    
-                    # MEMORY FIX: We save the full text to DB so it remembers later
                     display_text = f"{user_prompt}\n\n[UPLOADED PDF CONTENT]:\n{pdf_text}"
                     await status_msg.delete()
                 else:
                     await status_msg.edit("⚠️ **Scanned PDF Detected.** Please send a Screenshot (Photo) instead.")
                     return
             else:
-                # Text/Code Files
                 file_content = await client.download_media(message, in_memory=True)
                 text_content = file_content.getvalue().decode('utf-8')
                 current_file_content = text_content
@@ -223,7 +238,7 @@ async def chat_handler(client: Client, message: Message):
             user_prompt = message.text
             display_text = message.text
 
-        # 5. SEARCH (Only if no file attached)
+        # 5. SEARCH
         if not current_file_content and any(x in str(user_prompt).lower() for x in ["salary", "job", "news"]):
             search_res = await perform_web_search(user_prompt + " India")
             if search_res: 
@@ -232,18 +247,34 @@ async def chat_handler(client: Client, message: Message):
 
         # 6. GENERATE & SAVE
         past_history = await get_history(chat_id)
-        
-        # If we have file content, we pass it. If not, we pass empty (but history has previous files)
         ai_text = await generate_text_response(past_history, user_prompt, current_file_content)
-        
-        # CRITICAL: Save the display_text (which contains PDF content) to DB
         await add_history(chat_id, display_text, ai_text)
 
-        # 7. REPLY
+        # 7. GENERATE GRAPHICS (RESTORED!)
+        if "```mermaid" in ai_text:
+            try:
+                # Find the code block
+                matches = re.findall(r"```mermaid(.*?)```", ai_text, re.DOTALL)
+                if matches:
+                    # Generate Image
+                    image_file, _ = await get_mermaid_image(matches[0].strip())
+                    
+                    # Remove the raw code from the text reply so it looks clean
+                    ai_text = re.sub(r"```mermaid(.*?)```", "", ai_text, flags=re.DOTALL).strip()
+                    
+                    # Send Image
+                    if image_file:
+                        await client.send_photo(chat_id, photo=image_file, caption="**📊 Visual Roadmap**")
+            except Exception as e:
+                logging.error(f"Graph Error: {e}")
+
+        # 8. REPLY
         if message.voice:
             audio = text_to_audio(ai_text)
-            if audio: await message.reply_voice(audio)
-            else: await message.reply(ai_text, parse_mode=enums.ParseMode.MARKDOWN)
+            if audio: 
+                await message.reply_voice(audio, caption=ai_text[:200])
+            else: 
+                await message.reply(ai_text, parse_mode=enums.ParseMode.MARKDOWN)
         else:
             await message.reply(ai_text, parse_mode=enums.ParseMode.MARKDOWN)
 
