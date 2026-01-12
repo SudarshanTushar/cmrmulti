@@ -18,43 +18,35 @@ from pypdf import PdfReader
 from config import SAMBANOVA_API_KEY, SAMBANOVA_BASE_URL
 from db import get_history, add_history, clear_history
 
-# --- AI CLIENT CONFIGURATION ---
+# --- AI CLIENT ---
 aclient = AsyncOpenAI(
     api_key=SAMBANOVA_API_KEY,
     base_url=SAMBANOVA_BASE_URL
 )
 
-# --- MODELS ---
-# Text Model: Powerful logic & coding (Llama 3.3 70B)
 TEXT_MODEL = "Meta-Llama-3.3-70B-Instruct"
-# Vision Model: For viewing images (Llama 3.2 11B Vision)
 VISION_MODEL = "Llama-3.2-11B-Vision-Instruct" 
 
-# --- SYSTEM PROMPT ---
+# --- UPDATED SYSTEM PROMPT ---
 SYSTEM_PROMPT = """
 You are 'Pathsetu', an Elite AI Assistant.
 
-### CORE INSTRUCTIONS:
-1. **LANGUAGE ADAPTATION:** - DETECT the user's language (English, Hindi, Marathi, Telugu, etc.).
-   - **REPLY IN THE EXACT SAME LANGUAGE.**
-   - If the user mixes languages (Hinglish), reply in Hinglish.
+### CRITICAL RULES:
+1. **CONTEXT AWARENESS:** The system has ALREADY read the file and provided the text in the message below marked as `[FILE_CONTENT_START]`. 
+   - **DO NOT** say "I cannot read files". 
+   - **DO NOT** say "I am an AI model and cannot access external files".
+   - Treat the text provided in `[FILE_CONTENT]` as if you read the file yourself.
 
-2. **CAPABILITIES:**
-   - **Coding Expert:** Write, debug, and explain code in Python, Java, C++, JS, etc.
-   - **Document Analyst:** Summarize and answer questions from provided PDF context.
-   - **Image Analyst:** Explain images provided in the context.
-   - **Career Guide:** Provide roadmaps and guidance.
+2. **MEMORY:** You must remember the content of the file for follow-up questions.
 
-3. **FORMATTING:**
-   - Use Markdown (**Bold**, `Code Blocks`, *Italic*).
-   - For roadmaps, use `mermaid` graph TD.
-   - Be concise and direct.
+3. **LANGUAGE:** Reply in the EXACT language of the user.
+
+4. **FORMAT:** Use Markdown. Use `mermaid` graph TD for processes.
 """
 
-# --- HELPER FUNCTIONS ---
+# --- HELPERS ---
 
 async def perform_web_search(query):
-    """Searches the web for real-time info (Salary, Jobs, etc.)"""
     try:
         results = await asyncio.to_thread(lambda: list(DDGS().text(query, max_results=3)))
         if not results: return None
@@ -65,34 +57,30 @@ async def perform_web_search(query):
         return None
 
 async def extract_pdf_text(client, message):
-    """Extracts text from PDF. Returns None if scanned/empty."""
     try:
         doc_path = await client.download_media(message)
         reader = PdfReader(doc_path)
         text = ""
-        # Limit to first 15 pages to save speed/tokens
+        # Read up to 15 pages
         for page in reader.pages[:15]: 
             extracted = page.extract_text()
             if extracted:
                 text += extracted + "\n"
         
-        os.remove(doc_path) # Cleanup file
+        os.remove(doc_path)
         
-        # CHECK: If text is too short, it's likely a Scanned PDF (Images)
+        # Scanned PDF Check
         if len(text.strip()) < 50:
             return None 
             
-        return text[:15000] # Limit characters
+        return text[:15000] # Limit to 15k chars for memory safety
     except Exception as e:
         logging.error(f"PDF Error: {e}")
         return None
 
 async def analyze_image_samba(client, message, prompt):
-    """Uses SambaNova Vision model to see images."""
     try:
         photo_path = await client.download_media(message)
-        
-        # Convert image to Base64 for the API
         with open(photo_path, "rb") as image_file:
             base64_image = base64.b64encode(image_file.read()).decode('utf-8')
         os.remove(photo_path)
@@ -108,11 +96,9 @@ async def analyze_image_samba(client, message, prompt):
         )
         return response.choices[0].message.content
     except Exception as e:
-        logging.error(f"Vision Error: {e}")
-        return "⚠️ Error: I could not analyze the image. Server might be busy."
+        return "⚠️ I could not see the image. Server busy."
 
 async def transcribe_audio(file_bytes):
-    """Converts Voice Note to Text."""
     try:
         audio = AudioSegment.from_file(io.BytesIO(file_bytes), format="ogg")
         wav_io = io.BytesIO()
@@ -122,22 +108,16 @@ async def transcribe_audio(file_bytes):
         with sr.AudioFile(wav_io) as source:
             text = recognizer.recognize_google(recognizer.record(source))
             return text
-    except Exception as e:
-        logging.error(f"Transcribe Error: {e}")
+    except:
         return None
 
 def text_to_audio(text):
-    """Converts Text Reply to Voice Note."""
     try:
-        # Remove code blocks for speech
-        clean_text = re.sub(r"```.*?```", "Code snippet provided.", text, flags=re.DOTALL)
+        clean_text = re.sub(r"```.*?```", "Code snippet.", text, flags=re.DOTALL)
         clean_text = clean_text.replace("*", "").replace("#", "")
-        
-        # Simple Language Detection for TTS
         lang_code = 'en'
-        if any('\u0900' <= char <= '\u097f' for char in text): # Devanagari range
+        if any('\u0900' <= char <= '\u097f' for char in text): 
             lang_code = 'hi'
-            
         tts = gTTS(text=clean_text, lang=lang_code, slow=False)
         audio_io = io.BytesIO()
         tts.write_to_fp(audio_io)
@@ -147,23 +127,31 @@ def text_to_audio(text):
     except:
         return None
 
-async def generate_text_response(history, user_prompt, context_data=""):
-    """Core Logic: Sends prompt + context to SambaNova Llama 3.3"""
+# --- GENERATION LOGIC ---
+
+async def generate_text_response(history, user_prompt, current_file_content=""):
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     
-    # Add Chat History
+    # 1. Add Chat History (This now includes previous PDF text from DB)
     if history:
-        for entry in history[-4:]:
+        for entry in history[-4:]: # Last 4 turns
             role = "assistant" if entry.get("role") == "model" else "user"
             content = entry.get("parts", [""])[0]
             messages.append({"role": role, "content": str(content)})
             
-    # Combine Context + Prompt
-    final_content = user_prompt
-    if context_data:
-        final_content = f"### CONTEXT DATA (File/Search):\n{context_data}\n\n### USER QUESTION:\n{user_prompt}"
+    # 2. Add CURRENT New File Content (if any)
+    final_user_message = user_prompt
+    if current_file_content:
+        final_user_message = f"""
+        MY QUESTION: {user_prompt}
+        
+        [SYSTEM: THE FILE HAS BEEN OPENED. HERE IS THE CONTENT:]
+        [FILE_CONTENT_START]
+        {current_file_content}
+        [FILE_CONTENT_END]
+        """
 
-    messages.append({"role": "user", "content": final_content})
+    messages.append({"role": "user", "content": final_user_message})
 
     try:
         resp = await aclient.chat.completions.create(
@@ -171,113 +159,96 @@ async def generate_text_response(history, user_prompt, context_data=""):
         )
         return resp.choices[0].message.content
     except Exception as e:
-        logging.error(f"Text Model Error: {e}")
-        return "⚠️ AI Server is busy. Please try again in 5 seconds."
+        logging.error(f"Model Error: {e}")
+        return "⚠️ Server busy."
 
-# --- MAIN HANDLERS ---
+# --- HANDLERS ---
 
 async def start_handler(client: Client, message: Message):
     await clear_history(message.chat.id)
-    await message.reply(
-        "**🤖 Pathsetu AI Online**\n\n"
-        "I am ready. I can help you with:\n"
-        "📄 **PDFs:** Send file to read.\n"
-        "🖼️ **Images:** Send photo to analyze.\n"
-        "💻 **Coding:** Ask any programming question.\n"
-        "🗣️ **Voice:** I speak your language.\n\n"
-        "*Send a message to start!*"
-    )
+    await message.reply("**Pathsetu AI Ready.** Send a PDF, Image, or Audio.")
 
 async def chat_handler(client: Client, message: Message):
     chat_id = message.chat.id
-    context_data = ""
+    current_file_content = "" # Only for THIS turn
     user_prompt = ""
-    display_text = ""
+    display_text = "" # What is saved to DB
     
     try:
         await client.send_chat_action(chat_id, enums.ChatAction.TYPING)
 
-        # 1. HANDLE PHOTOS (Vision)
+        # 1. IMAGE (Vision)
         if message.photo:
-            await client.send_chat_action(chat_id, enums.ChatAction.UPLOAD_PHOTO)
-            caption = message.caption or "Explain this image."
-            ai_text = await analyze_image_samba(client, message, caption)
-            
-            await message.reply(f"**🖼️ Image Analysis:**\n\n{ai_text}", parse_mode=enums.ParseMode.MARKDOWN)
-            await add_history(chat_id, f"[Image]: {caption}", ai_text)
+            ai_text = await analyze_image_samba(client, message, message.caption or "Explain image")
+            await message.reply(f"**🖼️ Analysis:**\n{ai_text}", parse_mode=enums.ParseMode.MARKDOWN)
+            await add_history(chat_id, f"[Image Sent]: {message.caption}", ai_text)
             return
 
-        # 2. HANDLE DOCUMENTS (PDF / Code)
+        # 2. PDF / DOCUMENT
         elif message.document:
             if message.document.mime_type == "application/pdf":
-                status_msg = await message.reply("📄 Reading PDF...", quote=True)
+                status_msg = await message.reply("📄 Processing PDF...", quote=True)
                 pdf_text = await extract_pdf_text(client, message)
                 
                 if pdf_text:
-                    context_data += f"\n[PDF CONTENT]:\n{pdf_text}\n"
-                    user_prompt = message.caption or "Summarize this PDF."
-                    display_text = f"📄 PDF: {message.document.file_name}"
+                    # IMPORTANT: We attach text to this variable
+                    current_file_content = pdf_text
+                    user_prompt = message.caption or "Analyze this PDF file."
+                    
+                    # MEMORY FIX: We save the full text to DB so it remembers later
+                    display_text = f"{user_prompt}\n\n[UPLOADED PDF CONTENT]:\n{pdf_text}"
                     await status_msg.delete()
                 else:
-                    # SCANNED PDF DETECTED
-                    await status_msg.edit(
-                        "⚠️ **Cannot Read Text**\n\n"
-                        "This looks like a **Scanned PDF** (Images inside PDF).\n"
-                        "👉 **Solution:** Take a Screenshot of the page and send it as a **Photo**."
-                    )
+                    await status_msg.edit("⚠️ **Scanned PDF Detected.** Please send a Screenshot (Photo) instead.")
                     return
             else:
-                # Text/Code Files (.py, .txt, etc.)
-                try:
-                    file_content = await client.download_media(message, in_memory=True)
-                    text_content = file_content.getvalue().decode('utf-8')
-                    context_data += f"\n[FILE CONTENT]:\n{text_content}\n"
-                    user_prompt = message.caption or "Analyze this code/file."
-                    display_text = f"📁 File: {message.document.file_name}"
-                except:
-                    await message.reply("❌ Supported formats: PDF, Text, Code files, Photos.")
-                    return
+                # Text/Code Files
+                file_content = await client.download_media(message, in_memory=True)
+                text_content = file_content.getvalue().decode('utf-8')
+                current_file_content = text_content
+                user_prompt = message.caption or "Analyze code."
+                display_text = f"{user_prompt}\n\n[FILE CONTENT]:\n{text_content}"
 
-        # 3. HANDLE VOICE
+        # 3. VOICE
         elif message.voice:
             voice_bytes = bytes((await message.download(in_memory=True)).getbuffer())
-            transcription = await transcribe_audio(voice_bytes)
-            if not transcription:
-                await message.reply("⚠️ Audio not clear.")
+            user_prompt = await transcribe_audio(voice_bytes)
+            if not user_prompt: 
+                await message.reply("⚠️ Audio unclear.")
                 return
-            user_prompt = transcription
             display_text = f"🎤 {user_prompt}"
 
-        # 4. HANDLE TEXT
+        # 4. TEXT
         elif message.text:
             user_prompt = message.text
             display_text = message.text
 
-        # 5. SEARCH & GENERATE
-        triggers = ["salary", "job", "vacancy", "news", "price", "stock"]
-        if user_prompt and any(x in user_prompt.lower() for x in triggers):
+        # 5. SEARCH (Only if no file attached)
+        if not current_file_content and any(x in str(user_prompt).lower() for x in ["salary", "job", "news"]):
             search_res = await perform_web_search(user_prompt + " India")
-            if search_res: context_data += search_res
+            if search_res: 
+                user_prompt += f"\n{search_res}"
+                display_text += f"\n{search_res}"
 
-        if not user_prompt: user_prompt = "Explain the uploaded content."
-
-        # Get Response
+        # 6. GENERATE & SAVE
         past_history = await get_history(chat_id)
-        ai_text = await generate_text_response(past_history, user_prompt, context_data)
+        
+        # If we have file content, we pass it. If not, we pass empty (but history has previous files)
+        ai_text = await generate_text_response(past_history, user_prompt, current_file_content)
+        
+        # CRITICAL: Save the display_text (which contains PDF content) to DB
         await add_history(chat_id, display_text, ai_text)
 
-        # 6. REPLY (Text or Voice)
+        # 7. REPLY
         if message.voice:
             audio = text_to_audio(ai_text)
-            if audio: 
-                await message.reply_voice(audio, caption=ai_text[:200])
-            else: 
-                await message.reply(ai_text, parse_mode=enums.ParseMode.MARKDOWN)
+            if audio: await message.reply_voice(audio)
+            else: await message.reply(ai_text, parse_mode=enums.ParseMode.MARKDOWN)
         else:
             await message.reply(ai_text, parse_mode=enums.ParseMode.MARKDOWN)
 
     except Exception as e:
-        logging.error(f"Handler Error: {e}")
+        logging.error(f"Error: {e}")
         await message.reply(f"⚠️ Error: {str(e)}")
 
 def register_handlers(app: Client):
