@@ -13,43 +13,48 @@ from pyrogram import Client, filters, enums
 from pyrogram.types import Message
 from pyrogram.handlers import MessageHandler
 from duckduckgo_search import DDGS
-from pypdf import PdfReader  # PDF handling
+from pypdf import PdfReader
 
 from config import SAMBANOVA_API_KEY, SAMBANOVA_BASE_URL
 from db import get_history, add_history, clear_history
 
-# --- AI CONFIGURATION ---
-# Hum same client use karenge Text aur Images dono ke liye
+# --- AI CLIENT CONFIGURATION ---
 aclient = AsyncOpenAI(
     api_key=SAMBANOVA_API_KEY,
     base_url=SAMBANOVA_BASE_URL
 )
 
-# --- MODEL LIST ---
-# Text ke liye Llama 3.3, Images ke liye Llama 3.2 Vision
+# --- MODELS ---
+# Text Model: Powerful logic & coding (Llama 3.3 70B)
 TEXT_MODEL = "Meta-Llama-3.3-70B-Instruct"
+# Vision Model: For viewing images (Llama 3.2 11B Vision)
 VISION_MODEL = "Llama-3.2-11B-Vision-Instruct" 
 
 # --- SYSTEM PROMPT ---
 SYSTEM_PROMPT = """
-You are 'Pathsetu', an Elite AI Assistant & Career Guardian.
+You are 'Pathsetu', an Elite AI Assistant.
 
-### YOUR CAPABILITIES:
-1. **CODING EXPERT:** You can analyze, debug, and generate code in Python, Java, C++, JavaScript, etc. Always explain the logic.
-2. **DOCUMENT ANALYST:** You can read PDF contexts provided to you and answer questions based on them.
-3. **IMAGE ANALYST:** You can see images and explain them.
-4. **CAREER GUIDE:** Bridge the gap between rural students and modern opportunities.
+### CORE INSTRUCTIONS:
+1. **LANGUAGE ADAPTATION:** - DETECT the user's language (English, Hindi, Marathi, Telugu, etc.).
+   - **REPLY IN THE EXACT SAME LANGUAGE.**
+   - If the user mixes languages (Hinglish), reply in Hinglish.
 
-### CORE RULES:
-- **DETECT LANGUAGE:** Reply in the EXACT language of the user (Hindi/Marathi/English etc).
-- **VISUALS:** Use `mermaid` graphs for roadmaps (Current -> Action -> Goal).
-- **ACCURACY:** Be precise. No fluff.
-- **FORMAT:** Use Markdown. For code, use code blocks.
+2. **CAPABILITIES:**
+   - **Coding Expert:** Write, debug, and explain code in Python, Java, C++, JS, etc.
+   - **Document Analyst:** Summarize and answer questions from provided PDF context.
+   - **Image Analyst:** Explain images provided in the context.
+   - **Career Guide:** Provide roadmaps and guidance.
+
+3. **FORMATTING:**
+   - Use Markdown (**Bold**, `Code Blocks`, *Italic*).
+   - For roadmaps, use `mermaid` graph TD.
+   - Be concise and direct.
 """
 
 # --- HELPER FUNCTIONS ---
 
 async def perform_web_search(query):
+    """Searches the web for real-time info (Salary, Jobs, etc.)"""
     try:
         results = await asyncio.to_thread(lambda: list(DDGS().text(query, max_results=3)))
         if not results: return None
@@ -60,20 +65,54 @@ async def perform_web_search(query):
         return None
 
 async def extract_pdf_text(client, message):
+    """Extracts text from PDF. Returns None if scanned/empty."""
     try:
         doc_path = await client.download_media(message)
         reader = PdfReader(doc_path)
         text = ""
-        # Limit to first 10 pages
-        for page in reader.pages[:10]: 
-            text += page.extract_text() + "\n"
-        os.remove(doc_path)
-        return text[:12000] # Token limit safety
+        # Limit to first 15 pages to save speed/tokens
+        for page in reader.pages[:15]: 
+            extracted = page.extract_text()
+            if extracted:
+                text += extracted + "\n"
+        
+        os.remove(doc_path) # Cleanup file
+        
+        # CHECK: If text is too short, it's likely a Scanned PDF (Images)
+        if len(text.strip()) < 50:
+            return None 
+            
+        return text[:15000] # Limit characters
     except Exception as e:
         logging.error(f"PDF Error: {e}")
         return None
 
+async def analyze_image_samba(client, message, prompt):
+    """Uses SambaNova Vision model to see images."""
+    try:
+        photo_path = await client.download_media(message)
+        
+        # Convert image to Base64 for the API
+        with open(photo_path, "rb") as image_file:
+            base64_image = base64.b64encode(image_file.read()).decode('utf-8')
+        os.remove(photo_path)
+
+        messages = [
+            {"role": "user", "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+            ]}
+        ]
+        response = await aclient.chat.completions.create(
+            model=VISION_MODEL, messages=messages, max_tokens=800
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        logging.error(f"Vision Error: {e}")
+        return "⚠️ Error: I could not analyze the image. Server might be busy."
+
 async def transcribe_audio(file_bytes):
+    """Converts Voice Note to Text."""
     try:
         audio = AudioSegment.from_file(io.BytesIO(file_bytes), format="ogg")
         wav_io = io.BytesIO()
@@ -88,93 +127,41 @@ async def transcribe_audio(file_bytes):
         return None
 
 def text_to_audio(text):
+    """Converts Text Reply to Voice Note."""
     try:
-        clean_text = re.sub(r"```mermaid.*?```", "", text, flags=re.DOTALL)
-        clean_text = clean_text.replace("*", "").replace("#", "").replace("- ", " ")
-        lang_code = 'en'
-        if any('\u0900' <= char <= '\u097f' for char in text): # Devanagari check
-            lang_code = 'hi'
+        # Remove code blocks for speech
+        clean_text = re.sub(r"```.*?```", "Code snippet provided.", text, flags=re.DOTALL)
+        clean_text = clean_text.replace("*", "").replace("#", "")
         
+        # Simple Language Detection for TTS
+        lang_code = 'en'
+        if any('\u0900' <= char <= '\u097f' for char in text): # Devanagari range
+            lang_code = 'hi'
+            
         tts = gTTS(text=clean_text, lang=lang_code, slow=False)
         audio_io = io.BytesIO()
         tts.write_to_fp(audio_io)
         audio_io.seek(0)
-        audio_io.name = "guidance.mp3"
+        audio_io.name = "response.mp3"
         return audio_io
-    except Exception as e:
-        logging.error(f"TTS Error: {e}")
+    except:
         return None
 
-async def get_mermaid_image(mermaid_code):
-    try:
-        graph_code = mermaid_code.replace("```mermaid", "").replace("```", "").strip()
-        if "%%{init:" not in graph_code:
-            graph_code = "%%{init: {'theme': 'base', 'themeVariables': { 'primaryColor': '#ffcc00', 'edgeLabelBackground':'#ffffff', 'tertiaryColor': '#fff'}}}%%\n" + graph_code
-        graph_code = graph_code.replace("graph LR", "graph TD")
-        b64 = base64.urlsafe_b64encode(graph_code.encode("utf8")).decode('ascii')
-        url = f"https://mermaid.ink/img/{b64}?bgColor=FFFFFF"
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, timeout=20.0)
-            if resp.status_code == 200:
-                file_obj = io.BytesIO(resp.content)
-                file_obj.name = "career_path.jpg"
-                return file_obj, url
-            return None, None
-    except Exception as e:
-        logging.error(f"Mermaid Error: {e}")
-        return None, None
-
-# --- CORE GENERATION LOGIC ---
-
-async def analyze_image_samba(client, message, prompt):
-    """SambaNova Vision Model Handler"""
-    try:
-        # Download photo
-        photo_path = await client.download_media(message)
-        
-        # Convert to Base64
-        with open(photo_path, "rb") as image_file:
-            base64_image = base64.b64encode(image_file.read()).decode('utf-8')
-        os.remove(photo_path) # Cleanup
-
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{base64_image}"
-                        }
-                    }
-                ]
-            }
-        ]
-
-        response = await aclient.chat.completions.create(
-            model=VISION_MODEL,
-            messages=messages,
-            max_tokens=500
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        logging.error(f"Vision Error: {e}")
-        return "⚠️ Image analysis failed. Server might be busy."
-
 async def generate_text_response(history, user_prompt, context_data=""):
+    """Core Logic: Sends prompt + context to SambaNova Llama 3.3"""
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     
+    # Add Chat History
     if history:
         for entry in history[-4:]:
             role = "assistant" if entry.get("role") == "model" else "user"
             content = entry.get("parts", [""])[0]
             messages.append({"role": role, "content": str(content)})
             
+    # Combine Context + Prompt
     final_content = user_prompt
     if context_data:
-        final_content = f"CONTEXT DATA (PDF/FILE/SEARCH):\n{context_data}\n\nUSER QUESTION: {user_prompt}"
+        final_content = f"### CONTEXT DATA (File/Search):\n{context_data}\n\n### USER QUESTION:\n{user_prompt}"
 
     messages.append({"role": "user", "content": final_content})
 
@@ -185,19 +172,20 @@ async def generate_text_response(history, user_prompt, context_data=""):
         return resp.choices[0].message.content
     except Exception as e:
         logging.error(f"Text Model Error: {e}")
-        return "⚠️ Server Busy. Try again."
+        return "⚠️ AI Server is busy. Please try again in 5 seconds."
 
 # --- MAIN HANDLERS ---
 
 async def start_handler(client: Client, message: Message):
     await clear_history(message.chat.id)
     await message.reply(
-        "**🚀 Pathsetu AI Ultimate**\n\n"
-        "Fully upgraded with Vision & Documents:\n"
-        "📄 **PDF Reader:** Send any PDF.\n"
-        "🖼️ **Vision Eye:** Send any Photo.\n"
-        "💻 **Code:** I can code in any language.\n\n"
-        "Try sending a file now!"
+        "**🤖 Pathsetu AI Online**\n\n"
+        "I am ready. I can help you with:\n"
+        "📄 **PDFs:** Send file to read.\n"
+        "🖼️ **Images:** Send photo to analyze.\n"
+        "💻 **Coding:** Ask any programming question.\n"
+        "🗣️ **Voice:** I speak your language.\n\n"
+        "*Send a message to start!*"
     )
 
 async def chat_handler(client: Client, message: Message):
@@ -209,75 +197,76 @@ async def chat_handler(client: Client, message: Message):
     try:
         await client.send_chat_action(chat_id, enums.ChatAction.TYPING)
 
-        # 1. HANDLE IMAGES (Priority)
+        # 1. HANDLE PHOTOS (Vision)
         if message.photo:
             await client.send_chat_action(chat_id, enums.ChatAction.UPLOAD_PHOTO)
-            caption = message.caption or "Describe this image in detail."
+            caption = message.caption or "Explain this image."
             ai_text = await analyze_image_samba(client, message, caption)
             
-            await message.reply(f"**🖼️ Vision Analysis:**\n\n{ai_text}", parse_mode=enums.ParseMode.MARKDOWN)
-            await add_history(chat_id, f"[Image Sent]: {caption}", ai_text)
+            await message.reply(f"**🖼️ Image Analysis:**\n\n{ai_text}", parse_mode=enums.ParseMode.MARKDOWN)
+            await add_history(chat_id, f"[Image]: {caption}", ai_text)
             return
 
-        # 2. HANDLE VOICE
-        if message.voice:
-            voice_bytes = bytes((await message.download(in_memory=True)).getbuffer())
-            transcription = await transcribe_audio(voice_bytes)
-            if not transcription:
-                await message.reply("⚠️ Could not hear audio.")
-                return
-            user_prompt = transcription
-            display_text = f"🎤 {user_prompt}"
-
-        # 3. HANDLE TEXT
-        elif message.text:
-            user_prompt = message.text
-            display_text = message.text
-
-        # 4. HANDLE DOCUMENTS (PDF/Code)
+        # 2. HANDLE DOCUMENTS (PDF / Code)
         elif message.document:
             if message.document.mime_type == "application/pdf":
-                await message.reply("📄 Reading PDF...", quote=True)
+                status_msg = await message.reply("📄 Reading PDF...", quote=True)
                 pdf_text = await extract_pdf_text(client, message)
+                
                 if pdf_text:
                     context_data += f"\n[PDF CONTENT]:\n{pdf_text}\n"
-                    user_prompt = message.caption or "Summarize this document."
-                    display_text = f"📄 Uploaded PDF: {message.document.file_name}"
+                    user_prompt = message.caption or "Summarize this PDF."
+                    display_text = f"📄 PDF: {message.document.file_name}"
+                    await status_msg.delete()
                 else:
-                    await message.reply("❌ Could not read PDF text.")
+                    # SCANNED PDF DETECTED
+                    await status_msg.edit(
+                        "⚠️ **Cannot Read Text**\n\n"
+                        "This looks like a **Scanned PDF** (Images inside PDF).\n"
+                        "👉 **Solution:** Take a Screenshot of the page and send it as a **Photo**."
+                    )
                     return
             else:
-                # Code files or txt
+                # Text/Code Files (.py, .txt, etc.)
                 try:
                     file_content = await client.download_media(message, in_memory=True)
                     text_content = file_content.getvalue().decode('utf-8')
                     context_data += f"\n[FILE CONTENT]:\n{text_content}\n"
-                    user_prompt = message.caption or "Analyze this file."
-                    display_text = f"📁 Uploaded File: {message.document.file_name}"
+                    user_prompt = message.caption or "Analyze this code/file."
+                    display_text = f"📁 File: {message.document.file_name}"
                 except:
-                    await message.reply("❌ Only PDF or Text-based files supported.")
+                    await message.reply("❌ Supported formats: PDF, Text, Code files, Photos.")
                     return
 
+        # 3. HANDLE VOICE
+        elif message.voice:
+            voice_bytes = bytes((await message.download(in_memory=True)).getbuffer())
+            transcription = await transcribe_audio(voice_bytes)
+            if not transcription:
+                await message.reply("⚠️ Audio not clear.")
+                return
+            user_prompt = transcription
+            display_text = f"🎤 {user_prompt}"
+
+        # 4. HANDLE TEXT
+        elif message.text:
+            user_prompt = message.text
+            display_text = message.text
+
         # 5. SEARCH & GENERATE
-        triggers = ["salary", "job", "opening", "vacancy", "news", "trend"]
+        triggers = ["salary", "job", "vacancy", "news", "price", "stock"]
         if user_prompt and any(x in user_prompt.lower() for x in triggers):
             search_res = await perform_web_search(user_prompt + " India")
             if search_res: context_data += search_res
 
+        if not user_prompt: user_prompt = "Explain the uploaded content."
+
+        # Get Response
         past_history = await get_history(chat_id)
         ai_text = await generate_text_response(past_history, user_prompt, context_data)
         await add_history(chat_id, display_text, ai_text)
 
-        # 6. MERMAID GRAPHICS
-        if "```mermaid" in ai_text:
-            matches = re.findall(r"```mermaid(.*?)```", ai_text, re.DOTALL)
-            if matches:
-                image_file, _ = await get_mermaid_image(matches[0].strip())
-                ai_text = re.sub(r"```mermaid(.*?)```", "", ai_text, flags=re.DOTALL).strip()
-                if image_file:
-                    await client.send_photo(chat_id, photo=image_file)
-
-        # 7. FINAL REPLY
+        # 6. REPLY (Text or Voice)
         if message.voice:
             audio = text_to_audio(ai_text)
             if audio: 
