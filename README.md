@@ -58,7 +58,7 @@ cd pathsetu-bot
 ```Bash
 
 pip install -r requirements.txt
-Note: You also need ffmpeg installed on your system.
+#Note: You also need ffmpeg installed on your system.
 
 Ubuntu/Debian: sudo apt install ffmpeg
 
