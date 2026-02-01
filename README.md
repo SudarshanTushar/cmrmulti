@@ -53,8 +53,9 @@ Rural students often lack access to career guidance and exposure to diverse job 
 ```bash
 git clone [https://github.com/yourusername/pathsetu-bot.git](https://github.com/yourusername/pathsetu-bot.git)
 cd pathsetu-bot
-2. Install Dependencies
-Bash
+```
+### 2. Install Dependencies
+```Bash
 
 pip install -r requirements.txt
 Note: You also need ffmpeg installed on your system.
@@ -62,13 +63,14 @@ Note: You also need ffmpeg installed on your system.
 Ubuntu/Debian: sudo apt install ffmpeg
 
 Windows: Download and add to PATH.
+```
 
 Heroku: Add https://github.com/jonathanong/heroku-buildpack-ffmpeg-latest.git to your app's buildpacks.
 
-3. Configuration
+### 3. Configuration
 Edit config.py or set Environment Variables:
 
-Python
+```Python
 
 API_ID = "123456"               # Telegram API ID
 API_HASH = "your_hash"          # Telegram API Hash
@@ -76,10 +78,12 @@ BOT_TOKEN = "your_bot_token"    # Telegram Bot Token
 MONGO_URI = "mongodb+srv://..." # MongoDB Connection
 SAMBANOVA_API_KEY = "xyz..."    # SambaNova AI Key
 SAMBANOVA_BASE_URL = "[https://api.sambanova.ai/v1](https://api.sambanova.ai/v1)"
-4. Run the Bot
-Bash
+```
+### 4. Run the Bash
+```Bash
 
 python bot.py
+```
 📱 Usage Guide
 Start the Bot: Send /start to initialize.
 
@@ -106,7 +110,7 @@ We welcome contributions to make career guidance accessible to every student in 
 
 Fork the repo.
 
-Create a feature branch (git checkout -b feature/NewLanguage).
+Create a feature branch gitt checkout -b feature/NewLanguage).
 
 Commit changes.
 
